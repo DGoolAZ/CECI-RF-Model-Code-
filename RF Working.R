@@ -9,6 +9,8 @@ library(vip)
 library(pROC)
 library(pdp)
 
+# STEP 1: Load in Data ----------------------------------------------------------
+
 # Define a function to impute NA values with the mean for a raster layer
 impute_na_with_mean <- function(r) {
   vals <- values(r)
@@ -82,6 +84,16 @@ cat("Summary of presence data:\n")
 print(summary(presence_df))
 cat("\n")
 
+###################################################
+#               STEP 1 Explanation                #
+###################################################
+# In Step 1, we prepare our data for modeling. We start by loading presence data from a CSV file and adjusting column names to match the structure of the data. 
+# Next, we convert this data into a spatial points dataframe (sf object) using longitude and latitude coordinates. 
+# We then read in raster data stored in a specified directory, ensuring all rasters align with a template raster (DEM.tif) by resampling and imputing missing values using a bilinear method. 
+# Finally, we extract values from these rasters corresponding to the presence data locations, preparing them for subsequent modeling steps.
+
+# STEP 2: GENERATE BACKGROUND DATA ----------------------------------------------
+
 # Generate background data
 set.seed(17172)
 background_points <- spatSample(raster_stack, size = nrow(presence_data_clean), xy = TRUE, as.df = TRUE)
@@ -117,13 +129,21 @@ cat("Summary of combined data:\n")
 print(summary(combined_data_clean))
 cat("\n")
 
+#########################################
+#        STEP 2 Explanation             #
+#########################################
+# In Step 2, we create background data for our modeling process. Using spatial sampling (`spatSample`), we generate random points across our raster stack, ensuring they align with our presence data's spatial extent. 
+# These points are converted into a spatial points dataframe (`sf object`) and values are extracted from our raster stack at these locations. 
+# After combining these background values with our presence data, we ensure they share the same columns and clean the combined dataset by removing any remaining missing values, preparing it for model training.
+
+# STEP 3: TRAIN RF MODEL --------------------------------------------------------
+
 # Define response and predictors
 response_var <- "response"
 predictors <- setdiff(names(combined_data_clean), response_var)
 
 # Train the Random Forest model
 rf_formula <- as.formula(paste(response_var, "~", paste(predictors, collapse = " + ")))
-
 
 rf_model <- randomForest(rf_formula,
                          data = combined_data_clean,
@@ -135,6 +155,14 @@ rf_model <- randomForest(rf_formula,
 # Debugging: Print the random forest model
 print(rf_model)
 
+#######################################
+#          STEP 3 Explanation         #
+#######################################
+# In Step 3, we train a Random Forest (RF) model using our prepared data. We define the response variable (`response`) and predictors by removing the response variable from the dataset columns. 
+# The RF model is then built with 1000 trees (`ntree = 1000`) and 2 variables (`mtry = 2`) considered at each split, utilizing the entire dataset (`type = "prob"` for probability predictions). 
+# This model will be used to predict the probability of presence across our raster stack based on the environmental predictors identified.
+
+# STEP4: PREDICT OVER RASTER ----------------------------------------------------
 # Predict raster using the trained model
 predictions <- terra::predict(raster_stack, rf_model, type = "prob", index = 2, filename="F:\\Modeling\\CECI Update\\RF_ModelR1.tif", na.rm=TRUE, progress="text", overwrite=TRUE)
 
@@ -149,18 +177,21 @@ cat("\n")
 # Plot the predicted raster
 plot(predicted_raster, main="Predicted Probability of Presence", col=viridis::viridis(100))
 
+#################################
+#         STEP 4 Explanation    #
+#################################
+# In Step 4, we apply our trained RF model to predict the probability of species presence across our entire raster stack. 
+# The model generates predictions and saves them as a raster file (`RF_ModelR1.tif`). 
+# After loading these predictions into R as a raster object, we summarize its properties and visualize the predicted probabilities using a color gradient (`viridis::viridis(100)`).
 
-
-
-
-
-
+# STEP 5 ANALYSIS ---------------------------------------------------------------
 
 predict_function <- function(object, newdata) {
   predict(object, newdata, type = "prob")[, 2]
 }
 
-
+# Predict probabilities on the training data
+train_predictions <- predict(rf_model, combined_data_clean, type = "prob")[, 2]
 
 # Create a variable importance plot
 importance_df <- data.frame(Variable = rownames(rf_model$importance),
@@ -175,48 +206,21 @@ ggplot(importance_df, aes(x = reorder(Variable, Importance), y = Importance)) +
   ggtitle("Variable Importance Plot") +
   theme_minimal()
 
-# Define a custom function to calculate AUC for the permutation importance
-calculate_auc <- function(model, data) {
-  predictions <- predict(model, data, type = "prob")[, 2]
-  auc(roc(data$response, predictions))$auc
+# Define a custom function to calculate AUC for the RF model
+calculate_auc <- function(actual, predicted) {
+  roc_obj <- roc(actual, predicted)
+  auc(roc_obj)
 }
 
-perm_importance <- vip::vi(
-  object = rf_model,
-  method = "permute",
-  target = "response",
-  train = combined_data_clean,
-  metric = yardstick::roc_auc_vec,
-  pred_wrapper = predict_function,
-  nsim = 50,  # Number of permutations
-  sample_frac = 1,  # Use the whole dataset for each permutation
-  smaller_is_better = FALSE
-)
+# Calculate AUC for the RF model
+auc_value <- calculate_auc(combined_data_clean$response, train_predictions)
+cat("AUC for the RF model:", auc_value, "\n")
 
-
-
-# Plot permutation importance using ggplot2
-vip::vip(perm_importance, num_features = length(predictors), geom = "col") +
-  theme_minimal() +
-  ggtitle("Permutation Variable Importance Plot") +
-  xlab("Variables") +
-  ylab("Importance")
-
-
-
-# Create PDPs for all predictor variables
-for (var in predictors) {
-  pd <- partial(rf_model, pred.var = var, train = combined_data_clean, prob = TRUE)
-  p <- autoplot(pd) +
-    ggtitle(paste("Partial Dependence Plot for", var)) +
-    xlab(var) +
-    ylab("Predicted Probability of Presence") +
-    theme_minimal()
-  print(p)  # Display each plot
-  
-  # Prompt the user to press Enter to continue to the next plot
-  cat("Press Enter to continue to the next plot...")
-  readline()
-}
-
+#################################
+#         STEP 5 Explanation    #
+#################################
+# In Step 5, we analyze the performance and insights from our trained Random Forest (RF) model. 
+# We first define a prediction function to compute probabilities using our model. 
+# Then, we predict probabilities on the training data (`combined_data_clean`) and visualize the variable importance using a bar plot with ggplot2. 
+# Additionally, we calculate the Area Under the Curve (AUC) to assess the model's predictive accuracy, providing a quantitative measure (`auc_value`) of its performance.
 
