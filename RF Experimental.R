@@ -47,7 +47,7 @@ if (nrow(presence_data_clean) == 0) {
 }
 
 # Define minimum distance in kilometers
-min_dist_km <- 2  # Example: 2 km
+min_dist_km <- 4  # Example: 4 km
 
 # Apply the custom thinning function
 presence_data_thinned_sf <- thin_points_sf(presence_data_clean, min_dist_km)
