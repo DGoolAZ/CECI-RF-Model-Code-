@@ -223,4 +223,3 @@ cat("AUC for the RF model:", auc_value, "\n")
 # We first define a prediction function to compute probabilities using our model. 
 # Then, we predict probabilities on the training data (`combined_data_clean`) and visualize the variable importance using a bar plot with ggplot2. 
 # Additionally, we calculate the Area Under the Curve (AUC) to assess the model's predictive accuracy, providing a quantitative measure (`auc_value`) of its performance.
-
