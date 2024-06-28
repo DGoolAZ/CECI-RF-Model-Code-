@@ -11,14 +11,26 @@ library(yardstick)
 library(pdp)
 library(caret)
 library(spThin)
-library(sp)
-library(terra)
-library(sf)
-library(data.table)
-library(sp)
+library(rpart.plot)
+library(reprtree)
+library(plotrix)
+library(tree)
+library(partykit)
+library(dplyr)
+library(grid)
+library(igraph)
+library(ggraph)
 
+# Define a function to impute NA values with the mean for a raster layer
+impute_na_with_mean <- function(r) {1
+  vals <- values(r)
+  na_mean <- mean(vals, na.rm = TRUE)
+  vals[is.na(vals)] <- na_mean
+  values(r) <- vals
+  return(r)
+}
 
-# Define a function to manually thin the points based on a minimum distance
+# Function to manually thin the points based on a minimum distance
 thin_points_sf <- function(points, min_dist) {
   points_sf <- st_as_sf(points, coords = c("longitude", "latitude"), crs = 4326)
   thinned_sf <- points_sf[1, ]  # Start with the first point
@@ -41,13 +53,13 @@ presence_data <- fread("F:\\Modeling\\CECI Update\\Presance\\Pima_Presaince.csv"
 presence_data_clean <- presence_data[, .(latitude = get("latitude"), longitude = get("longitude"))]
 presence_data_clean <- na.omit(presence_data_clean)
 
-# Debugging: Check if presence_data_clean is empty
+# Check if presence_data_clean is empty
 if (nrow(presence_data_clean) == 0) {
   stop("Presence data is empty after cleaning.")
 }
 
 # Define minimum distance in kilometers
-min_dist_km <- 4  # Example: 4 km
+min_dist_km <- 4.5  # Example: 4 km
 
 # Apply the custom thinning function
 presence_data_thinned_sf <- thin_points_sf(presence_data_clean, min_dist_km)
@@ -62,7 +74,6 @@ ggplot(presence_data_thinned, aes(x = longitude, y = latitude)) +
   ggtitle("Presence Data Points After Thinning") +
   xlab("Longitude") +
   ylab("Latitude")
-
 
 # Convert to sf object
 presence_data_sf <- st_as_sf(presence_data_thinned, coords = c("longitude", "latitude"), crs = 4326)
@@ -86,7 +97,7 @@ for (file in raster_files) {
   raster_name <- tools::file_path_sans_ext(basename(file))
   aligned_rasters[[raster_name]] <- r
   
-  # Debugging: Print summary of each raster
+  # Print summary of each raster
   cat("Summary of raster", raster_name, ":\n")
   print(summary(r))
   cat("\n")
@@ -105,7 +116,7 @@ for (i in seq_along(raster_stack)) {
     raster_stack[[i]] <- impute_na_with_mean(raster_stack[[i]])
   }
   
-  # Debugging: Check for NAs after imputation
+  # Check for NAs after imputation
   cat("Number of NAs in raster", names(raster_stack)[i], "after imputation:", sum(is.na(values(raster_stack[[i]]))), "\n")
 }
 
@@ -116,7 +127,7 @@ presence_df <- as.data.table(presence_data_sf)
 presence_df <- cbind(presence_df, presence_values)
 presence_df$response <- 1
 
-# Debugging: Print summary of presence data
+# Print summary of presence data
 cat("Summary of presence data:\n")
 print(summary(presence_df))
 cat("\n")
@@ -131,7 +142,7 @@ background_df <- as.data.table(background_sf)
 background_df <- cbind(background_df, background_values)
 background_df$response <- 0
 
-# Debugging: Print summary of background data
+# Print summary of background data
 cat("Summary of background data:\n")
 print(summary(background_df))
 cat("\n")
@@ -154,7 +165,7 @@ combined_data_clean$response <- as.factor(combined_data_clean$response)
 # Rename levels of the response variable to valid R variable names
 levels(combined_data_clean$response) <- make.names(levels(combined_data_clean$response))
 
-# Debugging: Print summary of combined data
+# Print summary of combined data
 cat("Summary of combined data:\n")
 print(summary(combined_data_clean))
 cat("\n")
@@ -163,38 +174,90 @@ cat("\n")
 response_var <- "response"
 predictors <- setdiff(names(combined_data_clean), response_var)
 
-# Train the Random Forest model
-rf_formula <- as.formula(paste(response_var, "~", paste(predictors, collapse = " + ")))
+# Define response and predictors
+response_var <- "response"
+predictors <- setdiff(names(combined_data_clean), response_var)
 
-# Set up cross-validation
-control <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = twoClassSummary)
+# Set the number of trees and mtry values for tuning
+ntree_values <- seq(500, 1500, by = 250)  # Corrected syntax
+mtry_values <- seq(2, min(10, length(predictors)), by = 2)
 
-# Train the Random Forest model with cross-validation
-rf_model_cv <- train(
-  rf_formula,
+# Create a tuning grid
+tune_grid <- expand.grid(mtry = mtry_values)
+
+# Initialize results storage
+results <- data.frame(ntree = integer(), mtry = integer(), ROC = numeric())
+
+# Set up cross-validation control
+control <- trainControl(method = "cv", number = 10, classProbs = TRUE, summaryFunction = twoClassSummary)
+
+# Loop over ntree values and train the model for each value
+for (ntree in ntree_values) {
+  rf_model_cv <- train(
+    response ~ .,
+    data = combined_data_clean,
+    method = "rf",
+    trControl = control,
+    tuneGrid = tune_grid,
+    metric = "ROC",
+    ntree = ntree
+  )
+  
+  # Extract cross-validated AUC
+  cv_results <- rf_model_cv$results
+  best_mtry <- cv_results[which.max(cv_results$ROC), "mtry"]
+  best_roc <- max(cv_results$ROC)
+  
+  # Store results
+  results <- rbind(results, data.frame(ntree = ntree, mtry = best_mtry, ROC = best_roc))
+}
+
+# Print the results
+print(results)
+
+# Select the best model based on ROC
+best_model_index <- which.max(results$ROC)
+best_ntree <- results$ntree[best_model_index]
+best_mtry <- results$mtry[best_model_index]
+
+# Train the final model with the best hyperparameters
+final_rf_model <- randomForest(
+  response ~ .,
   data = combined_data_clean,
-  method = "rf",
-  trControl = control,
-  metric = "ROC"
+  ntree = best_ntree,
+  mtry = best_mtry
 )
 
-# Print cross-validated model results
-print(rf_model_cv)
+# Ensure predictor names in the raster stack match the model
+raster_names <- names(raster_stack)
+model_vars <- predictors
 
-# Extract and plot cross-validated AUC
-cv_results <- rf_model_cv$results
-cv_auc <- cv_results[which.max(cv_results$ROC), "ROC"]
+if (!all(model_vars %in% raster_names)) {
+  stop("Mismatch between model variables and raster stack names.")
+}
+
+# Create a unique filename for the prediction output
+output_filename <- paste0("F:\\Modeling\\CECI Update\\RF_Model_", Sys.Date(), ".tif")
 
 # Predict raster using the trained model
-predictions <- terra::predict(raster_stack, rf_model_cv$finalModel, type = "prob", index = 2, filename="F:\\Modeling\\CECI Update\\RF_ModelR1.tif", na.rm=TRUE, progress="text", overwrite=TRUE)
-predicted_raster <- rast("F:\\Modeling\\CECI Update\\RF_ModelR1.tif")
-plot(predicted_raster, main="Predicted Probability of Presence", col=viridis::viridis(100))
+predictions <- tryCatch({
+  terra::predict(raster_stack, final_rf_model, type = "prob", index = 2, filename=output_filename, na.rm=TRUE, progress="text", overwrite= FALSE)
+}, error = function(e) {
+  cat("Error in prediction step:", e$message, "\n")
+  NULL
+})
+
+if (!is.null(predictions)) {
+  predicted_raster <- rast(output_filename)
+  plot(predicted_raster, main="Predicted Probability of Presence", col=viridis::viridis(100))
+} else {
+  cat("Prediction step failed. Please check the compatibility of the model and the raster stack.\n")
+}
 
 # Define a custom prediction function for permutation importance
 predict_function <- function(object, newdata) {
   predict(object, newdata, type = "prob")[, 2]
 }
-
 # Calculate permutation importance with AUC as the metric
 perm_importance <- vip::vi(
   object = rf_model_cv$finalModel,
@@ -228,19 +291,19 @@ for (var in predictors) {
   readline()
 }
 
-# Extract the predictions and plot ROC curves for each fold
-predictions <- rf_model_cv$pred
-folds <- unique(predictions$Resample)
-
-# Initialize plot
-plot(0, 0, type = "n", xlab = "1 - Specificity", ylab = "Sensitivity", xlim = c(0, 1), ylim = c(0, 1), main = "ROC Curves for Each Fold")
-
 # Plot ROC curve for each fold
 for (fold in folds) {
   fold_predictions <- predictions[predictions$Resample == fold, ]
   roc_obj <- roc(fold_predictions$obs, fold_predictions$yes)
   plot(roc_obj, col = "blue", add = TRUE)
 }
+
+# Extract the predictions and plot ROC curves for each fold
+predictions <- rf_model_cv$pred
+folds <- unique(predictions$Resample)
+
+# Initialize plot
+plot(0, 0, type = "n", xlab = "1 - Specificity", ylab = "Sensitivity", xlim = c(0, 1), ylim = c(0, 1), main = "ROC Curves for Each Fold")
 
 # Add a legend with the fold names
 legend("bottomright", legend = paste("Fold", folds), col = "blue", lty = 1)
@@ -254,3 +317,87 @@ train_predictions <- predict(rf_model_cv, combined_data_clean, type = "prob")[, 
 roc_obj <- roc(combined_data_clean$response, train_predictions)
 plot(roc_obj, main = "Cross-Validated ROC Curve for Random Forest Model", col = "blue")
 mtext(paste("AUC:", round(cv_auc, 3)), side = 1, line = 2.5, at = 0.5, col = "blue")
+
+
+
+
+
+
+
+
+
+# Load necessary libraries
+library(randomForest)
+library(ggplot2)
+library(igraph)
+library(ggraph)
+library(tibble)
+library(tidyr)
+library(dplyr)
+library(grid)
+
+# Ensure igraph and tidyr are loaded
+if (!requireNamespace("igraph", quietly = TRUE)) {
+  install.packages("igraph")
+}
+library(igraph)
+
+if (!requireNamespace("tidyr", quietly = TRUE)) {
+  install.packages("tidyr")
+}
+library(tidyr)
+
+# Function to plot a tree
+plot_tree <- function(final_model, tree_num) {
+  tree <- randomForest::getTree(final_model, k = tree_num, labelVar = TRUE) %>%
+    tibble::rownames_to_column("rowname") %>%
+    mutate(`split point` = ifelse(is.na(prediction), `split point`, NA))
+  
+  graph_frame <- tree %>%
+    select(rowname, `left daughter`, `right daughter`) %>%
+    tidyr::pivot_longer(cols = c(`left daughter`, `right daughter`),
+                        names_to = "direction", values_to = "to") %>%
+    filter(to != 0) %>%
+    select(from = rowname, to)
+  
+  graph <- graph_from_data_frame(graph_frame)
+  
+  V(graph)$name <- as.character(V(graph))
+  V(graph)$node_label <- gsub("_", " ", as.character(tree$`split var`[match(V(graph)$name, tree$rowname)]))
+  V(graph)$leaf_label <- as.character(tree$prediction[match(V(graph)$name, tree$rowname)])
+  V(graph)$split <- as.character(round(tree$`split point`[match(V(graph)$name, tree$rowname)], digits = 2))
+  
+  plot <- ggraph(graph, 'dendrogram') + 
+    theme_bw() +
+    geom_edge_link() +
+    geom_node_point() +
+    geom_node_text(aes(label = node_label), na.rm = TRUE, repel = TRUE) +
+    geom_node_label(aes(label = split), vjust = 2.5, na.rm = TRUE, fill = "white") +
+    geom_node_label(aes(label = leaf_label, fill = leaf_label), na.rm = TRUE, 
+                    repel = TRUE, colour = "white", fontface = "bold", show.legend = FALSE) +
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.background = element_blank(),
+          plot.background = element_rect(fill = "white"),
+          panel.border = element_blank(),
+          axis.line = element_blank(),
+          axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          plot.title = element_text(size = 18)) +
+    ggtitle(paste("Decision Tree", tree_num))
+  
+  return(plot)
+}
+
+# Create and save plots for the first 200 trees
+output_directory <- "F:\\Modeling\\CECI Update\\TreePlots"
+dir.create(output_directory, showWarnings = FALSE)
+
+for (i in 500:1000) {
+  plot <- plot_tree(rf_model_cv$finalModel, i)
+  jpeg_filename <- file.path(output_directory, paste0("tree_", i, ".jpg"))
+  ggsave(filename = jpeg_filename, plot = plot, width = 30, height = 30, dpi = 300, units = "in")
+}
